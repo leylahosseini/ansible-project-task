@@ -1,0 +1,5 @@
+---
+# vars file for install_kubernetes
+files_kubernetes: /home/files_kubernetes
+#discovery_token_ca_cert_hash: 
+master_node_ip: 192.168.1.114

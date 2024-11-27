@@ -1,0 +1,181 @@
+---
+# tasks file for install_kubernetes
+- name: Set hostname  
+  hostname:  
+    name: "{{ inventory_hostname }}"  
+
+- name: Update /etc/hosts   
+  lineinfile:  
+    path: /etc/hosts  
+    state: present  
+    line: "{{ hostvars[item]['ansible_host'] }} {{ item }}"  
+  loop:  
+    - master  
+    - worker  
+  when: inventory_hostname in ['master', 'worker']  
+
+- name: Install required packages  
+  apt:  
+    name:  
+      - apt-transport-https  
+      - ca-certificates  
+      - curl  
+      - gpg  
+    state: present  
+#    update_cache: true  
+
+- name: remove containerd
+  apt:  
+    name: containerd  
+    state: absent  
+  #  update_cache: true  
+
+- name: Configure containerd directory  
+  file:  
+    path: /etc/containerd  
+    state: directory 
+- name: Write containerd config to /etc/containerd/config.toml   
+  copy:  
+    src: files/config.toml
+    dest: /etc/containerd/config.toml  
+    owner: root  
+    group: root  
+    mode: '0644'  
+
+# # - name: Change SystemdCgroup setting in containerd config   
+# #   replace:  
+# #     path: /etc/containerd/config.toml  
+# #     regexp: '^SystemdCgroup = false'  
+# #     replace: 'SystemdCgroup = true'  
+
+- name: Create crictl configuration file   
+  copy:  
+    dest: /etc/crictl.yaml  
+    content: |  
+      runtime-endpoint: "unix:///run/containerd/containerd.sock"  
+      timeout: 0  
+      debug: false  
+    owner: root  
+    group: root  
+    mode: '0644'  
+
+
+- name: Configure Kubernetes netfilter settings  
+  copy:  
+    dest: /etc/sysctl.d/kubernetes.conf  
+    content: |  
+      net.bridge.bridge-nf-call-ip6tables = 1  
+      net.bridge.bridge-nf-call-iptables = 1  
+      net.ipv4.ip_forward = 1
+    owner: root  
+    group: root  
+    mode: '0644'  
+
+- name: Apply sysctl settings  
+  command: sysctl --system  
+  ignore_errors: true
+
+- name: Enable netfilter module  
+  command: modprobe br_netfilter  
+  ignore_errors: true
+
+- name: Disable swap Kubernetes requirement   
+  command: swapoff -a  
+  ignore_errors: true
+
+- name: Remove swap from fstab  
+  lineinfile:  
+    path: /etc/fstab  
+    state: absent  
+    regexp: '^.*swap.*'  
+
+
+- name: Copy kubeadm_config.yml to /opt  
+  copy:  
+    src: files/kubeadm_config.yml  
+    dest: /opt/kubeadm_config.yml  
+    owner: root  
+    group: root  
+    mode: '0644' 
+### 
+- name: Create files directory
+  ansible.builtin.file:
+    path: "{{ files_kubernetes }}"
+    state: directory
+
+- name: Copy packages to the files_kubernetes
+  copy:
+    src: files/
+    dest: "{{ files_kubernetes }}"
+    owner: root  
+    group: root  
+    mode: '0644'  
+
+- name: Install kubeadm, kubelet, kubectl packages    
+  apt:  
+    deb:  "{{ item }}"
+    state: present  
+  loop:  
+    - "{{ files_kubernetes }}/containerd.io_1.7.23-1_amd64.deb"
+    - "{{ files_kubernetes }}/cri-tools_1.30.1-1.1_amd64.deb"
+    - "{{ files_kubernetes }}/kubernetes-cni_1.4.0-1.1_amd64.deb"
+    - "{{ files_kubernetes }}/kubeadm_1.30.6-1.1_amd64.deb"  
+    - "{{ files_kubernetes }}/kubelet_1.30.6-1.1_amd64.deb"  
+    - "{{ files_kubernetes }}/kubectl_1.30.6-1.1_amd64.deb" 
+
+
+- name: Hold kubelet, kubeadm, and kubectl packages  
+  command: apt-mark hold kubelet kubeadm kubectl  
+
+- name: Restart containerd.io
+  service:
+    name: containerd.service
+    state: restarted
+
+- name: Start and enable kubelet  
+  systemd:  
+    name: kubelet  
+    state: started  
+    enabled: true 
+
+- name: Initialize Kubernetes master node   
+  command: kubeadm init --config /opt/kubeadm_config.yml  
+  register: kubeadm_init_output 
+  when: inventory_hostname == 'master'
+
+- name: Create .kube directory
+  file:
+    path: "{{ ansible_env.HOME }}/.kube"
+    state: directory
+    mode: '0755'
+  when: inventory_hostname == 'master'
+
+- name: Copy admin.conf to .kube/config
+  become: true
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ ansible_env.HOME }}/.kube/config"
+    owner: "root"
+    group: "root"
+    mode: '0644'
+    backup: yes
+    remote_src: yes
+  when: inventory_hostname == 'master'
+
+- name: Get kubeadm join command  
+  command: kubeadm token create --print-join-command  
+  register: join_command_output 
+  when: inventory_hostname == 'master'
+
+- name: Join the worker nodes to the Kubernetes cluster  
+  command: "{{ hostvars['master'].join_command_output.stdout }}"  
+  when: inventory_hostname != 'master' and 'join_command_output' in hostvars['master']
+
+
+- name: Install Calico CNI
+  command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+# command: kubectl apply -f  "{{ files_kubernetes }}/calico.yaml"
+  when: inventory_hostname == 'master'
+
+
+
